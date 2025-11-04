@@ -4,8 +4,9 @@ from typing import Dict, Any
 import json
 import logging
 import httpx 
-from dotenv import load_dotenv # Import untuk memuat .env
+from dotenv import load_dotenv
 import os 
+# TIDAK PERLU lagi mengimpor BaseModel dari pydantic!
 
 # 1. Muat .env di awal
 load_dotenv() 
@@ -19,18 +20,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 2. Ambil nilai dari .env menggunakan os.getenv()
+# Ambil nilai dari .env 
 WHATSAPP_API_URL = os.getenv("WA_API_URL", "http://localhost:3000/send/message")
 WHATSAPP_USERNAME = os.getenv("WA_USER", "default_user") 
 WHATSAPP_PASSWORD = os.getenv("WA_PASS", "default_pass")
 # -----------------------------------
 
-class WebhookResponse(Dict[str, Any]):
-    message: str
+# Class WebhookResponse dihapus!
 
 async def send_whatsapp_notification(phone_number: str, text_message: str):
-    """Mengirim pesan notifikasi ke endpoint Go WhatsApp."""
-    
+    # ... (fungsi ini tidak berubah) ...
     whatsapp_payload = {
         "phone": f"{phone_number}@s.whatsapp.net",
         "message": text_message,
@@ -57,7 +56,9 @@ async def send_whatsapp_notification(phone_number: str, text_message: str):
         return False, {"error": "Connection error to WA API"}
 
 
-@app.post("/webhook/uptime-kuma", response_model=WebhookResponse)
+# Endpoint Webhook Utama
+# 🔑 PERHATIKAN: response_model=None ditambahkan di sini
+@app.post("/webhook/uptime-kuma", response_model=None) 
 async def handle_uptime_kuma_webhook(payload: Dict[str, Any]):
     """Menerima payload webhook, memproses status, dan meneruskan ke Go WhatsApp."""
     
@@ -68,7 +69,6 @@ async def handle_uptime_kuma_webhook(payload: Dict[str, Any]):
     description = payload.get("description", "Detail tidak tersedia.")
     target_whatsapp_number = payload.get("for_whatsapp", "NOMOR_TIDAK_ADA")
     
-    # Ekstraksi kode status
     try:
         status_code = int(status_field.split(' ')[0])
     except:
@@ -82,7 +82,7 @@ async def handle_uptime_kuma_webhook(payload: Dict[str, Any]):
         notification_text = f"🚨 LAYANAN DOWN ({status_code})! Mohon segera dicek. Detail: {description}"
     
     
-    # Kirim Notifikasi ke Go WhatsApp API (hanya jika nomor tersedia)
+    # Kirim Notifikasi ke Go WhatsApp API
     wa_success = False
     wa_result = {}
     
@@ -95,14 +95,9 @@ async def handle_uptime_kuma_webhook(payload: Dict[str, Any]):
         logging.warning("Nomor WhatsApp tidak ditemukan di payload ('for_whatsapp'). Notifikasi WA dilewatkan.")
 
 
-    # Buat Respons Akhir untuk Uptime Kuma
-    if wa_success:
-        response_message = f"Webhook DITERIMA & Notifikasi WA Sukses dikirim. Status Layanan: {status_field}"
-    else:
-        response_message = f"Webhook DITERIMA. Notifikasi WA GAGAL dikirim. Status Layanan: {status_field}"
-
+    # Mengembalikan dict Python biasa
     return {
-        "message": response_message,
+        "message": "Webhook DITERIMA, cek wa_sent untuk status notifikasi WA.",
         "service_status": status_field,
         "wa_sent": wa_success,
         "wa_api_result": wa_result
