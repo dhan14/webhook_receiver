@@ -36,7 +36,7 @@ app = FastAPI(
 # --- 2. FUNGSI PARSING & STATUS ---
 
 def sanitize_and_parse_payload(raw_body_str: str) -> Dict[str, Any] | None:
-    """Mencoba parsing JSON, dan melakukan sanitasi manual jika gagal."""
+    """Mencoba parsing JSON, dan melakukan sanitasi manual jika gagal (untuk Uptime Kuma)."""
     payload = {}
     try:
         payload = json.loads(raw_body_str)
@@ -46,10 +46,12 @@ def sanitize_and_parse_payload(raw_body_str: str) -> Dict[str, Any] | None:
         logging.warning("❌ Payload JSON tidak valid. Mencoba sanitasi manual...")
         
         sanitized_str = raw_body_str
+        # Perbaikan: key 'status' yang hilang quotes
         if 'status:' in raw_body_str and not '"status":' in raw_body_str:
             sanitized_str = raw_body_str.replace('status:', '"status":')
 
         try:
+            # Hapus newlines/tabs sebelum final parse
             sanitized_str = sanitized_str.replace('\n', '').replace('\t', '')
             payload = json.loads(sanitized_str)
             logging.info("✅ Sanitasi berhasil dan payload diparse.")
@@ -58,8 +60,8 @@ def sanitize_and_parse_payload(raw_body_str: str) -> Dict[str, Any] | None:
             logging.error(f"❌ Sanitasi gagal total. Webhook body tidak dapat diproses: {e}")
             return None 
 
-def determine_status_and_text(payload: Dict[str, Any]) -> Tuple[bool, str, str]:
-    """Menentukan status UP/DOWN dan membuat teks notifikasi dengan timestamp."""
+def determine_status_and_text(payload: Dict[str, Any]) -> Tuple[bool, str, str, bool]:
+    """Menentukan status UP/DOWN, is_testing, dan membuat teks notifikasi dengan timestamp."""
     
     status_field = str(payload.get("status", ""))
     description = payload.get("description", "Detail tidak tersedia.")
@@ -76,12 +78,16 @@ def determine_status_and_text(payload: Dict[str, Any]) -> Tuple[bool, str, str]:
     elif "down" in status_field.lower() or "failed" in status_field.lower() or "🔴" in description or "error" in status_field.lower():
         is_up = False
     else:
+        # Fallback: Coba ekstraksi kode angka atau cek string kosong
         match = re.search(r'^\d{3}', status_field)
         if (match and int(match.group(0)) < 400) or status_field.strip() == "":
-             is_up = True
+             is_up = True # Anggap UP jika status kosong (default Uptime Kuma)
         else:
              is_up = False 
     
+    # Pengecekan Testing
+    is_testing = "test" in description.lower() or "testing" in description.lower()
+
     
     # Tentukan Pesan Notifikasi 
     if is_up:
@@ -90,7 +96,7 @@ def determine_status_and_text(payload: Dict[str, Any]) -> Tuple[bool, str, str]:
         notification_text = f"🚨 Layanan mengalami masalah pada: **{current_time_wib}**\n\nDetail Error: {description}"
     
     
-    return is_up, notification_text, status_field
+    return is_up, notification_text, status_field, is_testing
 
 
 # --- 3. FUNGSI LOGIKA WHATSAPP (RECONNECT & RETRY) ---
@@ -173,27 +179,34 @@ async def handle_uptime_kuma_webhook(request: Request):
 
     # 2. Pemrosesan Logika
     logging.info("--- Payload Webhook Diterima ---")
-    print(json.dumps(payload, indent=4))
+    # print(json.dumps(payload, indent=4)) # Dapat dinonaktifkan di production
     
-    is_up, notification_text, status_field = determine_status_and_text(payload)
+    is_up, notification_text, status_field, is_testing = determine_status_and_text(payload)
     target_whatsapp_number = payload.get("for_whatsapp", "NOMOR_TIDAK_ADA")
     
     
-    # 3. Pengiriman Notifikasi (Hanya jika DOWN/ERROR)
+    # 3. Pengiriman Notifikasi (Hanya jika DOWN/ERROR ATAU TESTING)
     wa_success = False
     wa_result = {}
     
+    # Notifikasi dikirim JIKA: Status BUKAN UP (DOWN/ERROR) ATAU Status adalah TESTING
+    should_send_notification = not is_up or is_testing 
+    
+    
     if target_whatsapp_number != "NOMOR_TIDAK_ADA":
         
-        if not is_up:
-            logging.info("🚨 Status DOWN/Error terdeteksi. Mengirim notifikasi...")
+        if should_send_notification:
+            
+            log_status = "DOWN/Error" if not is_up else "TESTING"
+            logging.info(f"🚨 Status {log_status} terdeteksi. Mengirim notifikasi...")
             
             wa_success, wa_result = await send_whatsapp_notification(
                 phone_number=target_whatsapp_number, 
                 text_message=notification_text
             )
         else:
-            logging.info("ℹ️ Status UP terdeteksi. Notifikasi WhatsApp dilewati sesuai permintaan.")
+            # Jika status UP dan BUKAN TESTING, notifikasi dilewati.
+            logging.info("ℹ️ Status UP terdeteksi, dan BUKAN TESTING. Notifikasi WhatsApp dilewati.")
             wa_success = True 
             wa_result = {"status": "skipped", "reason": "Service is UP, notification suppressed"}
     else:
@@ -202,7 +215,7 @@ async def handle_uptime_kuma_webhook(request: Request):
 
     return {
         "message": "Webhook DITERIMA, cek wa_sent untuk status notifikasi WA.",
-        "service_status_identified": "UP" if is_up else "DOWN",
+        "service_status_identified": "UP (Skipped)" if not should_send_notification else ("DOWN" if not is_up else "TESTING"),
         "wa_sent": wa_success,
         "wa_api_result": wa_result
     }
