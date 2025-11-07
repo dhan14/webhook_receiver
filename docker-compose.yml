@@ -1,0 +1,26 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  webhook-bridge:
+    # Build image dari Dockerfile di direktori saat ini
+    build: .
+    
+    container_name: fastapi-webhook-bridge
+    
+    # Memuat variabel lingkungan dari .env
+    env_file:
+      - .env
+      
+    # Mapping Port: host_port:container_port
+    ports:
+      - "3010:3010"
+      
+    # Mengurangi batas memori karena hanya 1 worker
+    mem_limit: 128m 
+    
+    # Restart hanya saat di-deploy ulang, bukan saat crash (development)
+    # restart: always # Nonaktifkan atau hapus ini untuk development
+    
+    # --- COMMAND YANG DIMINTA: UVICORN TUNGGAL DENGAN RELOAD ---
+    command: uvicorn main:app --host 0.0.0.0 --port 3010 --reload
