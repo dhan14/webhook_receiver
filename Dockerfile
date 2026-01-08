@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Mengatur port yang diekspos
-EXPOSE 3010
+EXPOSE 3031
 
 # Command default untuk menjalankan aplikasi dengan UVICORN TUNGGAL dan RELOAD
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3010", "--reload"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3031", "--reload"]
