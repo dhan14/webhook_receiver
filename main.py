@@ -28,9 +28,9 @@ WHATSAPP_API_URL, WHATSAPP_RECONNECT_URL, WHATSAPP_USERNAME, WHATSAPP_PASSWORD =
 
 # Inisialisasi FastAPI
 app = FastAPI(
-    title="Webhook Bridge FastAPI",
+    title="Webhook Receiver",
     description="Meneruskan notifikasi Uptime Kuma ke layanan Go WhatsApp",
-    version="1.0.0"
+    version="1.0.1"
 )
 
 # --- 2. FUNGSI PARSING & STATUS ---
@@ -113,7 +113,7 @@ async def _perform_wa_request(client: httpx.AsyncClient, url: str, payload: Dict
     )
     return response
 
-async def send_whatsapp_notification(phone_number: str, text_message: str):
+async def send_whatsapp_notification_phone(phone_number: str, text_message: str):
     """Mengirim pesan notifikasi ke endpoint Go WhatsApp dengan logika retry 401."""
     
     whatsapp_payload = {
@@ -161,11 +161,59 @@ async def send_whatsapp_notification(phone_number: str, text_message: str):
             logging.critical(f"❌ Error koneksi ke Go WhatsApp API: {e}")
             return False, {"error": "Connection error to WA API"}
 
+async def send_whatsapp_notification_group(group_id: str, text_message: str):
+    """Mengirim pesan notifikasi ke endpoint Go WhatsApp dengan logika retry 401."""
+
+    whatsapp_payload = {
+        "phone": f"{group_id}@g.us",
+        "message": text_message,
+        "is_forwarded": False
+    }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        # ATTEMPT 1
+        try:
+            response = await _perform_wa_request(client, WHATSAPP_API_URL, whatsapp_payload)
+
+            if response.status_code >= 200 and response.status_code < 300:
+                logging.info(f"✅ Notifikasi WA berhasil dikirim ke grup (Percobaan 1). Status: {response.status_code}")
+                return True, response.json()
+
+            elif response.status_code == 401:
+                logging.warning("⚠ Otorisasi WA GAGAL (401). Mencoba Reconnect dan Retry...")
+
+                # RECONNECT STEP
+                reconnect_response = await _perform_wa_request(client, WHATSAPP_RECONNECT_URL, {}, is_reconnect=True)
+
+                if reconnect_response.status_code >= 200 and reconnect_response.status_code < 300:
+                    logging.info("✅ Reconnect ke WA API Sukses. Mencoba kirim ulang pesan...")
+
+                    # ATTEMPT 2
+                    retry_response = await _perform_wa_request(client, WHATSAPP_API_URL, whatsapp_payload)
+
+                    if retry_response.status_code >= 200 and retry_response.status_code < 300:
+                        logging.info(f"✅ Notifikasi WA berhasil dikirim ke grup (Percobaan 2). Status: {retry_response.status_code}")
+                        return True, retry_response.json()
+                    else:
+                        logging.error(f"❌ Gagal kirim WA setelah Reconnect. Status: {retry_response.status_code}")
+                        return False, {"error": "Failed after reconnect retry", "detail": retry_response.text}
+                else:
+                    logging.error(f"❌ Reconnect ke WA API GAGAL. Status: {reconnect_response.status_code}")
+                    return False, {"error": "Reconnect failed", "detail": reconnect_response.text}
+
+            else:
+                logging.error(f"❌ Gagal kirim notifikasi WA (Non-401). Status: {response.status_code}")
+                return False, {"error": "Failed to send WA message", "detail": response.text}
+
+        except httpx.RequestError as e:
+            logging.critical(f"❌ Error koneksi ke Go WhatsApp API: {e}")
+            return False, {"error": "Connection error to WA API"}
+
 
 # --- 4. ENDPOINT UTAMA (Mengkoordinasikan semua fungsi) ---
 
-@app.post("/webhook/uptime-kuma", response_model=None) 
-async def handle_uptime_kuma_webhook(request: Request): 
+@app.post("/webhook/uptime-kuma/phone", response_model=None) 
+async def handle_uptime_kuma_webhook_phone(request: Request): 
     """Endpoint utama untuk menerima, memproses, dan meneruskan Webhook."""
     
     # 1. Parsing dan Sanitasi
@@ -200,7 +248,7 @@ async def handle_uptime_kuma_webhook(request: Request):
             log_status = "DOWN/Error" if not is_up else "TESTING"
             logging.info(f"🚨 Status {log_status} terdeteksi. Mengirim notifikasi...")
             
-            wa_success, wa_result = await send_whatsapp_notification(
+            wa_success, wa_result = await send_whatsapp_notification_phone(
                 phone_number=target_whatsapp_number, 
                 text_message=notification_text
             )
@@ -220,7 +268,63 @@ async def handle_uptime_kuma_webhook(request: Request):
         "wa_api_result": wa_result
     }
 
+@app.post("/webhook/uptime-kuma/group", response_model=None)
+async def handle_uptime_kuma_webhook_group(request: Request):
+    """Endpoint utama untuk menerima, memproses, dan meneruskan Webhook."""
+
+    # 1. Parsing dan Sanitasi
+    raw_body = await request.body()
+    raw_body_str = raw_body.decode('utf-8').strip()
+
+    payload = sanitize_and_parse_payload(raw_body_str)
+
+    if payload is None:
+        return {"message": "Gagal memproses Webhook: JSON tidak valid", "wa_sent": False, "raw_body": raw_body_str}
+
+    # 2. Pemrosesan Logika
+    logging.info("--- Payload Webhook Diterima ---")
+    # print(json.dumps(payload, indent=4)) # Dapat dinonaktifkan di production
+
+    is_up, notification_text, status_field, is_testing = determine_status_and_text(payload)
+    target_whatsapp_phone = payload.get("for_whatsapp", "GID_TIDAK_ADA")
+
+
+    # 3. Pengiriman Notifikasi (Hanya jika DOWN/ERROR ATAU TESTING)
+    wa_success = False
+    wa_result = {}
+
+    # Notifikasi dikirim JIKA: Status BUKAN UP (DOWN/ERROR) ATAU Status adalah TESTING
+    should_send_notification = not is_up or is_testing
+
+
+    if target_whatsapp_phone != "GID_TIDAK_ADA":
+
+        if should_send_notification:
+
+            log_status = "DOWN/Error" if not is_up else "TESTING"
+            logging.info(f"🚨 Status {log_status} terdeteksi. Mengirim notifikasi...")
+
+            wa_success, wa_result = await send_whatsapp_notification_group(
+                group_id=target_whatsapp_phone,
+                text_message=notification_text
+            )
+        else:
+            # Jika status UP dan BUKAN TESTING, notifikasi dilewati.
+            logging.info("ℹ Status UP terdeteksi, dan BUKAN TESTING. Notifikasi WhatsApp dilewati.")
+            wa_success = True
+            wa_result = {"status": "skipped", "reason": "Service is UP, notification suppressed"}
+    else:
+        logging.warning("Group ID WhatsApp tidak ditemukan di payload ('for_whatsapp'). Notifikasi WA dilewatkan.")
+
+
+    return {
+        "message": "Webhook DITERIMA, cek wa_sent untuk status notifikasi WA.",
+        "service_status_identified": "UP (Skipped)" if not should_send_notification else ("DOWN" if not is_up else "TESTING"),
+        "wa_sent": wa_success,
+        "wa_api_result": wa_result
+    }
+
 # Endpoint untuk testing dasar
 @app.get("/")
 def read_root():
-    return {"message": "Webhook Bridge Aktif di Port 3010"}
+    return {"message": "Webhook Bridge Aktif di Port 3031"}
