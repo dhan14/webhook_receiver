@@ -1,3 +1,4 @@
 WA_USER=""
 WA_PASS=""
-WA_API_URL="http://localhost:3000/send/message"
+WA_RECONNECT_URL="http://localhost:3031/app/reconnect"
+WA_API_URL="http://localhost:3031/send/message"
